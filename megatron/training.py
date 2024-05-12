@@ -650,6 +650,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     if iteration % args.log_interval == 0:
         elapsed_time = timers('interval-time').elapsed(barrier=True)
         elapsed_time_per_iteration = elapsed_time / total_iterations
+        samples_per_second = args.global_batch_size / elapsed_time_per_iteration
+        tokens_per_sec_per_replica = samples_per_second * args.seq_length  / args.world_size
         throughput = num_floating_point_operations(args, batch_size) / (
             elapsed_time_per_iteration * 10**12 * args.world_size)
         if args.log_timers_to_tensorboard:
@@ -665,6 +667,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             args.consumed_train_samples)
         log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
             elapsed_time_per_iteration * 1000.0)
+        log_string += ' tokens per sec per gpu: {:.5f} |'.format(tokens_per_sec_per_replica)
         if args.log_throughput:
             log_string += f' throughput per GPU (TFLOP/s/GPU): {throughput:.1f} |'
             if args.log_timers_to_tensorboard:
@@ -703,7 +706,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                 num_microbatches = get_num_microbatches()
                 report_theoretical_memory(args, num_microbatches=num_microbatches, verbose=True)
             report_memory('(after {} iterations)'.format(iteration))
-            report_memory_flag = False
+            report_memory_flag -= 1
         timers.log(timers_to_log, normalizer=args.log_interval)
 
     return report_memory_flag
@@ -762,7 +765,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
     timers('interval-time', log_level=0).start(barrier=True)
     print_datetime('before the start of training step')
-    report_memory_flag = True
+    report_memory_flag = 2
     exit = False
 
     if args.manual_gc:

@@ -56,6 +56,12 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     args.rank = int(os.getenv('RANK', '0'))
     args.world_size = int(os.getenv("WORLD_SIZE", '1'))
 
+    # launch from mpi
+    if int(os.getenv('OMPI_COMM_WORLD_SIZE', '0')) > 0:
+        args.rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
+        args.local_rank = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
+        args.world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
+
     return args
 
 def validate_args(args, defaults={}):
