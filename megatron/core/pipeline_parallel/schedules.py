@@ -8,7 +8,7 @@ from torch.autograd.variable import Variable
 
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
-from megatron.core.pipeline_parallel import p2p_communication
+from megatron.core.pipeline_parallel import offload, p2p_communication
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, get_model_config, get_model_type
 
@@ -208,6 +208,9 @@ def forward_step(
             output_tensor, loss_func = forward_step_func(
                 data_iterator, model, checkpoint_activations_microbatch
             )
+
+    # Unset the input tensor to release memory.
+    set_input_tensor(None)
 
     num_tokens = torch.tensor(0, dtype=torch.int)
     if parallel_state.is_pipeline_last_stage():
@@ -585,6 +588,12 @@ def forward_backward_pipelining_with_interleaving(
         )
         return microbatch_id_in_model_chunk
 
+    def get_offload_key(microbatch_id, *, forward):
+        group_id = microbatch_id // (pipeline_parallel_size * num_model_chunks)
+        model_chunk_id = get_model_chunk_id(microbatch_id, forward=forward)
+        microbatch_id_in_model_chunk = microbatch_id % pipeline_parallel_size
+        return group_id, model_chunk_id, microbatch_id_in_model_chunk
+
     def is_first_microbatch_for_model_chunk(microbatch_id: int) -> bool:
         """Check if an iteration is the first for a model chunk."""
         microbatch_group_size = pipeline_parallel_size * num_model_chunks
@@ -637,21 +646,27 @@ def forward_backward_pipelining_with_interleaving(
                 input_tensors[model_chunk_id].append(None)
         input_tensor = input_tensors[model_chunk_id][-1]
 
-        output_tensor, num_tokens = forward_step(
-            forward_step_func,
-            data_iterator[model_chunk_id],
-            model[model_chunk_id],
-            num_microbatches,
-            input_tensor,
-            forward_data_store,
-            config,
-            collect_non_loss_data,
-            checkpoint_activations_microbatch,
-            check_first_val_step(
-                first_val_step, forward_only, is_first_microbatch_for_model_chunk(microbatch_id),
-            ),
-            current_microbatch=current_microbatch,
-        )
+        # Avoid storing input_tensor.data in input_tensors.
+        if input_tensor is not None:
+            input_tensor, input_backward_handle = offload.get_forward_tensor_and_backward_handle(input_tensor)
+            input_tensors[model_chunk_id][-1] = input_backward_handle
+
+        with offload.record(get_offload_key(microbatch_id, forward=True), config.pipeline_parallel_aware_offloading_ratio):
+            output_tensor, num_tokens = forward_step(
+                forward_step_func,
+                data_iterator[model_chunk_id],
+                model[model_chunk_id],
+                num_microbatches,
+                input_tensor,
+                forward_data_store,
+                config,
+                collect_non_loss_data,
+                checkpoint_activations_microbatch,
+                check_first_val_step(
+                    first_val_step, forward_only, is_first_microbatch_for_model_chunk(microbatch_id),
+                ),
+                current_microbatch=current_microbatch,
+            )
         output_tensors[model_chunk_id].append(output_tensor)
 
         nonlocal total_num_tokens
@@ -710,12 +725,21 @@ def forward_backward_pipelining_with_interleaving(
 
     fwd_wait_handles = None
     bwd_wait_handles = None
+    offload_ctx = None
+    onload_ctx = None
 
     for k in range(num_warmup_microbatches):
 
         if fwd_wait_handles is not None:
             for req in fwd_wait_handles:
                 req.wait()
+
+        if offload_ctx is not None:
+            offload_ctx.__exit__(None, None, None)
+            offload_ctx = None
+        if k >= 1:
+            offload_ctx = offload.offload_async(get_offload_key(k - 1, forward=True))
+            offload_ctx.__enter__()
 
         cur_model_chunk_id = get_model_chunk_id(k, forward=True)
         # Decide to checkpoint all layers' activations of the current micro-batch
@@ -809,6 +833,35 @@ def forward_backward_pipelining_with_interleaving(
 
         deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
+    # offload/onload after p2p
+    if fwd_wait_handles is not None:
+        for req in fwd_wait_handles:
+            req.wait()
+    if offload_ctx is not None:
+        offload_ctx.__exit__(None, None, None)
+        offload_ctx = None
+    offload_ctx = offload.offload_async(get_offload_key(k, forward=True))
+    offload_ctx.__enter__()
+    if pipeline_parallel_rank != pipeline_parallel_size - 1 or num_microbatches_remaining == 0:
+        # TODO: optimize the case that m:p=1:1
+        onload_ctx = offload.onload_async(get_offload_key(0, forward=False))
+        onload_ctx.__enter__()
+
+    def schedule_1f1b_offload(forward_k, backward_k):
+        nonlocal onload_ctx, offload_ctx
+        if onload_ctx is not None:
+            onload_ctx.__exit__(None, None, None)
+            onload_ctx = None
+        if offload_ctx is not None:
+            offload_ctx.__exit__(None, None, None)
+            offload_ctx = None
+        if pipeline_parallel_rank != pipeline_parallel_size - 1 or get_model_chunk_id(forward_k, forward=True) != num_model_chunks - 1:
+            offload_ctx = offload.offload_async(get_offload_key(forward_k, forward=True))
+            offload_ctx.__enter__()
+        if pipeline_parallel_rank != pipeline_parallel_size - 1 or get_model_chunk_id(backward_k + 1, forward=False) != num_model_chunks - 1:
+            onload_ctx = offload.onload_async(get_offload_key(backward_k + 1, forward=False))
+            onload_ctx.__enter__()
+
     # Run 1F1B in steady state.
     for k in range(num_microbatches_remaining):
         # Forward pass.
@@ -881,6 +934,7 @@ def forward_backward_pipelining_with_interleaving(
 
             # Backward pass.
             backward_k = k
+            schedule_1f1b_offload(forward_k, backward_k)
             input_tensor_grad = backward_step_helper(backward_k)
 
             backward_model_chunk_id = get_model_chunk_id(backward_k, forward=False)
@@ -918,6 +972,7 @@ def forward_backward_pipelining_with_interleaving(
 
             # Backward pass.
             backward_k = k
+            schedule_1f1b_offload(forward_k, backward_k)
             input_tensor_grad = backward_step_helper(backward_k)
 
             # Send output_tensor and input_tensor_grad, receive input_tensor
@@ -1000,6 +1055,15 @@ def forward_backward_pipelining_with_interleaving(
                 p2p_communication.recv_backward(tensor_shape, config=config)
             )
         for k in range(num_microbatches_remaining, total_num_microbatches):
+            if onload_ctx is not None:
+                onload_ctx.__exit__(None, None, None)
+                onload_ctx = None
+            if offload_ctx is not None:
+                offload_ctx.__exit__(None, None, None)
+                offload_ctx = None
+            if k + 1 < total_num_microbatches:
+                onload_ctx = offload.onload_async(get_offload_key(k + 1, forward=False))
+                onload_ctx.__enter__()
             input_tensor_grad = backward_step_helper(k)
             next_backward_model_chunk_id = get_model_chunk_id(k + 1, forward=False)
             recv_next = True

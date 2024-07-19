@@ -558,7 +558,7 @@ def train_step(forward_step_func, data_iterator,
         forward_only=False)
 
     # Empty unused memory.
-    if args.empty_unused_memory_level >= 1:
+    if args.empty_unused_memory_level >= 1 or args.curr_iteration == args.first_iteration:
         torch.cuda.empty_cache()
 
     # Vision gradients.
@@ -998,6 +998,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                 'validation_iterations_time_msecs_avg': validation_iterations_time_msecs_avg
             })
 
+    args.first_iteration = iteration
     while iteration < args.train_iters:
         if args.profile and \
            iteration == args.profile_step_start and \

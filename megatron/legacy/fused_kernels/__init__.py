@@ -34,7 +34,7 @@ def load(args):
     _create_build_dir(buildpath)
 
     # Helper function to build the kernels.
-    def _cpp_extention_load_helper(name, sources, extra_cuda_flags):
+    def _cpp_extention_load_helper(name, sources, extra_cuda_flags, extra_include_paths):
         return cpp_extension.load(
             name=name,
             sources=sources,
@@ -50,8 +50,14 @@ def load(args):
             ]
             + extra_cuda_flags
             + cc_flag,
+            extra_include_paths=extra_include_paths,
             verbose=(args.rank == 0),
         )
+
+    sources = [srcpath / 'offload_utils.cpp']
+    extra_cuda_flags = []
+    extra_include_paths = cpp_extension.include_paths(cuda=True)
+    _cpp_extention_load_helper("offload_utils_ext", sources, extra_cuda_flags, extra_include_paths)
 
 
 def _get_cuda_bare_metal_version(cuda_dir):

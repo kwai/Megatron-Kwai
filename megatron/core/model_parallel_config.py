@@ -260,6 +260,16 @@ class ModelParallelConfig:
     """If True, offloads the weights to CPU."""
 
     ###################
+    # Pipeline-Parallel-Aware Offloading
+    ###################
+    pipeline_parallel_aware_offloading_ratio: float = 0.
+    """The proportion of offloaded activations relative to total activations. See Accelerating
+       the Training of Large Language Models using Efficient Activation Rematerialization and
+       Optimal Hybrid Parallelism (https://www.usenix.org/conference/atc24/presentation/yuan)
+       for more details.
+    """
+
+    ###################
     # Timing
     ###################
     barrier_with_L1_time: bool = True

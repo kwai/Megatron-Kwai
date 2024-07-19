@@ -49,6 +49,7 @@ def build_pretraining_data_loader(dataset, consumed_samples):
                                        num_workers=args.num_workers,
                                        pin_memory=True,
                                        persistent_workers=True if args.num_workers > 0 else False,
+                                       prefetch_factor=args.prefetch_factor,
                                        )
 
 class MegatronPretrainingSampler:

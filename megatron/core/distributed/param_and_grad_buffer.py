@@ -14,6 +14,10 @@ from .distributed_data_parallel_config import DistributedDataParallelConfig
 logger = getLogger(__name__)
 
 
+def lcm(a,b):
+    return (a * b) // math.gcd(a,b)
+
+
 class BufferType(Enum):
     PARAM = 1
     GRAD = 2
@@ -240,7 +244,7 @@ class ParamAndGradBuffer:
                 # This also helps cuBLAS pick more efficient algorithms for GEMMs.
                 # We now ensure that all buckets start at a memory address that is 256-byte
                 # aligned (128 values since params and grads use >= 16-bit precision).
-                return _pad(data_index, math.lcm(self.data_parallel_world_size, 128))
+                return _pad(data_index, lcm(self.data_parallel_world_size, 128))
             return data_index
 
         # First, figure out how many elements should be in the underlying buffer storage.
@@ -369,6 +373,7 @@ class ParamAndGradBuffer:
             param.main_grad = self._get(
                 param.data.shape, data_start_index, buffer_type=BufferType.GRAD
             )
+            param.main_grad.is_main_grad = True
             if bucket_id != cur_bucket_id:
                 bucket_data_end_index = _pad_if_needed(data_start_index)
                 self._set_bucket(

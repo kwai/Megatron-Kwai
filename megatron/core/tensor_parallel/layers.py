@@ -377,6 +377,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.sequence_parallel = sequence_parallel
         ctx.grad_output_buffer = grad_output_buffer
+        if gradient_accumulation_fusion:
+            ctx.main_grad = weight.main_grad
 
         if sequence_parallel:
             world_size = get_tensor_model_parallel_world_size()
@@ -458,6 +460,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             # reduce scatter is scheduled before the weight gradient computation
 
         if ctx.gradient_accumulation_fusion:
+            weight.main_grad = ctx.main_grad
             if wgrad_compute:
                 if weight.main_grad.dtype == torch.float32:
                     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(

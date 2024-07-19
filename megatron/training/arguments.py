@@ -65,6 +65,12 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     args.rank = int(os.getenv('RANK', '0'))
     args.world_size = int(os.getenv("WORLD_SIZE", '1'))
 
+    # Launch from mpi
+    if int(os.getenv('OMPI_COMM_WORLD_SIZE', '0')) > 0:
+        args.rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
+        args.local_rank = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
+        args.world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
+
     return args
 
 
@@ -437,6 +443,10 @@ def validate_args(args, defaults={}):
         assert args.recompute_method is None, \
             'recompute method is not yet supported for ' \
             'selective recomputing granularity'
+
+    if args.pipeline_parallel_aware_offloading_ratio:
+        assert args.virtual_pipeline_model_parallel_size, \
+            'Pipeline-parallel-aware offloading is supported for interleaved pipeline parallelism'
 
     # disable sequence parallelism when tp=1
     # to avoid change in numerics when
@@ -1312,6 +1322,11 @@ def _add_distributed_args(parser):
     group.add_argument('--no-overlap-p2p-communication', action='store_false',
                        help='overlap pipeline parallel communication with forward and backward chunks',
                        dest='overlap_p2p_comm')
+    group.add_argument('--pipeline-parallel-aware-offloading-ratio', type=float, default=0.,
+                       help='The proportion of offloaded activations relative to total activations. See Accelerating '
+                       'the Training of Large Language Models using Efficient Activation Rematerialization and '
+                       'Optimal Hybrid Parallelism (https://www.usenix.org/conference/atc24/presentation/yuan) '
+                       'for more details.')
     group.add_argument('--distributed-backend', default='nccl',
                        choices=['nccl', 'gloo'],
                        help='Which backend to use for distributed training.')
@@ -1442,6 +1457,8 @@ def _add_data_args(parser):
                        help='Probability of producing a short sequence.')
     group.add_argument('--num-workers', type=int, default=2,
                        help="Dataloader number of workers.")
+    group.add_argument('--prefetch-factor', type=int, default=None,
+                       help="Dataloader prefetch factor.")
     group.add_argument('--tokenizer-type', type=str,
                        default=None,
                        choices=['BertWordPieceLowerCase',
