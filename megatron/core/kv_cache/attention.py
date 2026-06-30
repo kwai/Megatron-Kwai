@@ -136,6 +136,29 @@ def merge_out_lse(out: torch.Tensor, lse: torch.Tensor, scale, cp_group):
     return oi, lsei, req
 
 
+def a2a_out_lse(out: torch.Tensor, lse: torch.Tensor, cp_group):
+    CP = dist.get_world_size(cp_group)
+    lse = lse.contiguous()
+    flip_cp_(lse, 0, CP)
+    lse_t = torch.empty_like(lse)
+    req = dist.all_to_all_single(lse_t, lse, group=cp_group, async_op=True)
+    flip_cp_(out, 0, CP)
+    out_t = torch.empty_like(out)
+    req = dist.all_to_all_single(out_t, out, group=cp_group, async_op=True)
+    return out_t, lse_t, req
+
+
+@torch.compile(fullgraph=True)
+def sum_out_lse(out_t: torch.Tensor, lse_t: torch.Tensor, world_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    if world_size == 1:
+        return out_t, lse_t
+    lse_t = lse_t.unflatten(0, (world_size, -1))
+    out_t = out_t.unflatten(0, (world_size, -1))
+    lsei = torch.logsumexp(lse_t, dim=0)
+    oi = torch.sum(out_t * torch.exp(lse_t - lsei), dim=0).type_as(out_t)
+    return oi, lsei
+
+
 DEBUG_PAIR = False
 
 
@@ -216,7 +239,8 @@ def attn_forward_pair(ctx_pair, q, cp_group=None):
 
     # merge local out in CP
     if cp_group:
-        out, lse, cp_req = merge_out_lse(out, lse, None, cp_group)
+        # out, lse, cp_req = merge_out_lse(out, lse, None, cp_group)
+        out, lse, cp_req = a2a_out_lse(out, lse, cp_group)
 
     # post-attn calc
     if n < 0:
@@ -224,6 +248,7 @@ def attn_forward_pair(ctx_pair, q, cp_group=None):
         pair_print_debug('out recv-')
         if cp_group:
             cp_req.wait()
+            out, lse = sum_out_lse(out, lse, CP)
         update_out_lse(out, out_recv, lse, lse_recv)
     elif n > 0:
         assert all(req.wait() for req in reqs)
@@ -235,17 +260,21 @@ def attn_forward_pair(ctx_pair, q, cp_group=None):
         if cp_group:
             cp_req.wait()
             # merge remote out in CP
-            out_other, lse_other, cp_req = merge_out_lse(out_other, lse_other, None, cp_group)
+            # out_other, lse_other, cp_req = merge_out_lse(out_other, lse_other, None, cp_group)
+            out_other, lse_other, cp_req = a2a_out_lse(out_other, lse_other, cp_group)
+            out, lse = sum_out_lse(out, lse, CP)
             cp_req.wait()
+            out_other, lse_other = sum_out_lse(out_other, lse_other, CP)
         send_out = dist.P2POp(dist.isend, out_other, peer, group)
         send_lse = dist.P2POp(dist.isend, lse_other, peer, group)
         pair_print_debug('out send+', out_other.shape)
         reqs = dist.batch_isend_irecv([send_out, send_lse])
         assert all(req.wait() for req in reqs)
         pair_print_debug('out send-')
-
-    if cp_group:
-        cp_req.wait()
+    else:
+        if cp_group:
+            cp_req.wait()
+            out, lse = sum_out_lse(out, lse, CP)
     pair_print_debug('forward pair-', ctx_pair)
     yield out, lse
 
