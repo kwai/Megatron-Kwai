@@ -155,7 +155,7 @@ def sum_out_lse(out_t: torch.Tensor, lse_t: torch.Tensor, world_size: int) -> Tu
     lse_t = lse_t.unflatten(0, (world_size, -1))
     out_t = out_t.unflatten(0, (world_size, -1))
     lsei = torch.logsumexp(lse_t, dim=0)
-    oi = torch.sum(out_t * torch.exp(lse_t - lsei), dim=0, dtype=out_t.dtype)
+    oi = torch.sum(out_t * torch.exp(lse_t - lsei), dim=0).type_as(out_t)
     return oi, lsei
 
 
